@@ -64,22 +64,30 @@ def valor(txt):
     return txt
 
 
-def posicoes(cabecalho, rotulos):
-    """Posição inicial de cada rótulo na linha de cabeçalho."""
-    pos, inicio = [], 0
-    for r in rotulos:
-        p = cabecalho.index(r, inicio)
-        pos.append(p)
-        inicio = p + len(r)
-    return pos
+def mapear(cabecalho, rotulos):
+    """
+    Procura cada rótulo na linha de cabeçalho e devolve [(nome, posição), ...]
+    em ordem de posição. Não depende da ordem das colunas no relatório, e
+    rótulos que não existem no cabeçalho são simplesmente ignorados.
+
+    rotulos: {nome_da_coluna: [grafia1, grafia2, ...]}
+    """
+    achados = []
+    for nome, grafias in rotulos.items():
+        for g in grafias:
+            m = re.search(r"(?<!\S)" + re.escape(g) + r"(?!\S)", cabecalho)
+            if m:
+                achados.append((nome, m.start()))
+                break
+    return sorted(achados, key=lambda x: x[1])
 
 
-def fatiar(linha, pos):
-    """Fatia a linha de largura fixa conforme as posições."""
-    campos = []
-    for i, p in enumerate(pos):
-        fim = pos[i + 1] if i + 1 < len(pos) else None
-        campos.append(linha[p:fim].strip() if fim else linha[p:].strip())
+def fatiar(linha, mapa):
+    """Recorta a linha de largura fixa conforme o mapa e devolve {nome: texto}."""
+    campos = {}
+    for i, (nome, p) in enumerate(mapa):
+        fim = mapa[i + 1][1] if i + 1 < len(mapa) else None
+        campos[nome] = linha[p:fim].strip()
     return campos
 
 
@@ -111,23 +119,24 @@ def localizar_secoes(linhas):
 # ---------------------------- RESUMO --------------------------------------- #
 CAB_RESUMO = ["ANO", "PER", "GUIA SGU", "ID GUIA", "PRINCIPAL", "UNID",
               "CARTEIRA", "NOME", "VL.COBRADO", "VL.PRINCIPAL", "VL.DIFERENÇA"]
+ROT_RESUMO = {n: [n] for n in CAB_RESUMO[:8]}
 RE_LINHA_RESUMO = re.compile(r"^\s*\d{4}\s+\d{1,2}\s+\d+")
 
 
 def parse_resumo(linhas):
-    pos = None
+    mapa = None
     saida = []
     for l in linhas:
-        if pos is None and "ANO" in l and "GUIA SGU" in l and "VL.COBRADO" in l:
-            pos = posicoes(l, ["ANO", "PER", "GUIA SGU", "ID GUIA",
-                               "PRINCIPAL", "UNID", "CARTEIRA", "NOME"])
+        if mapa is None and "GUIA SGU" in l and "VL.COBRADO" in l:
+            mapa = mapear(l, ROT_RESUMO)
             continue
-        if pos is None or not RE_LINHA_RESUMO.match(l):
+        if mapa is None or not RE_LINHA_RESUMO.match(l):
             continue
         nums = list(RE_NUM_BR.finditer(l))[-3:]          # 3 valores finais
         corte = nums[0].start() if nums else len(l)
-        campos = fatiar(l[:corte], pos)
-        saida.append([valor(c) for c in campos] + [num_br(m.group()) for m in nums])
+        c = fatiar(l[:corte], mapa)
+        saida.append([valor(c.get(n)) for n in CAB_RESUMO[:8]]
+                     + [num_br(m.group()) for m in nums])
     return saida
 
 
@@ -140,22 +149,32 @@ CAB_DETALHE = ["ANO", "PER", "GUIA SGU", "ID GUIA", "AUDITORIA", "INTEGRAÇÃO",
                "NIVEL", "DT.REALZ", "HR.REALZ", "JUSTIFICATIVA", "AUDITOR",
                "SITUAÇÃO"]   # coluna extra: GLOSADO / ITEM AJUSTADO
 
-ROT_GUIA = ["ANO", "PER", "GUIA SGU", "ID GUIA", "AUDITORIA", "INTEGRA",
-            "PRINCIPAL", "UNID", "CARTEIRA", "NOME"]
-ROT_INTERN = ["DT.INTERNACAO", "DT.ALTA", "MOTIVO.ALTA", "SOLICITANTE",
-              "ACOMODACAO", "HOSP.DIA", "CID"]
-ROT_ITEM_ESQ = ["GLOSA", "MANUAL", "COD.ITEM", "TP.ITEM.VERSAO", "DESCRICAO"]
-ROT_ITEM_DIR = ["ERRO", "PRESTADOR", "NIVEL", "DT.REALZ", "HR.REALZ",
-                "JUSTIFICATIVA", "AUDITOR"]
+ROT_GUIA = {"ANO": ["ANO"], "PER": ["PER"], "GUIA SGU": ["GUIA SGU"], "ID GUIA": ["ID GUIA"],
+            "AUDITORIA": ["AUDITORIA"], "INTEGRAÇÃO": ["INTEGRAÇÃO", "INTEGRACAO"],
+            "PRINCIPAL": ["PRINCIPAL"], "UNID": ["UNID"], "CARTEIRA": ["CARTEIRA"],
+            "NOME": ["NOME"]}
+ROT_INTERN = {n: [n] for n in ["DT.INTERNACAO", "DT.ALTA", "MOTIVO.ALTA", "SOLICITANTE",
+                               "ACOMODACAO", "HOSP.DIA", "CID"]}
+ROT_ITEM_ESQ = {n: [n] for n in ["GLOSA", "MANUAL", "COD.ITEM", "TP.ITEM.VERSAO", "DESCRICAO"]}
+ROT_ITEM_DIR = {n: [n] for n in ["ERRO", "PRESTADOR", "NIVEL", "DT.REALZ", "HR.REALZ",
+                                 "JUSTIFICATIVA", "AUDITOR"]}
+TEXTO_LIVRE = {"TP.ITEM.VERSAO", "DESCRICAO", "PRESTADOR", "NIVEL", "HR.REALZ",
+               "JUSTIFICATIVA", "AUDITOR", "SOLICITANTE", "NOME", "CARTEIRA"}
+LARGURA_JUSTIFICATIVA = 51
+
+
+def _conv(nome, texto):
+    """Converte o texto de um campo; campos de texto livre ficam como texto."""
+    if nome in TEXTO_LIVRE:
+        return texto or None
+    return valor(texto)
 
 
 def parse_detalhe(linhas):
     saida = []
-    guia = [None] * len(ROT_GUIA)
-    intern = [None] * len(ROT_INTERN)
-    pos_guia = pos_int = None
-    pos_esq = pos_dir = None
-    largura_desc = 40
+    guia, intern = {}, {}
+    mapa_guia = mapa_int = mapa_esq = mapa_dir = None
+    ini_num = fim_num = 0
     espera = None          # "guia" | "intern" -> próxima linha é de dados
     ajustado = False
 
@@ -165,21 +184,25 @@ def parse_detalhe(linhas):
             continue
 
         if s.startswith("ANO") and "AUDITORIA" in l:
-            pos_guia = posicoes(l, ROT_GUIA)
-            espera, ajustado = "guia", False
-            intern = [None] * len(ROT_INTERN)
+            mapa_guia = mapear(l, ROT_GUIA)
+            espera, ajustado, intern = "guia", False, {}
             continue
         if s.startswith("DT.INTERNACAO"):
-            pos_int = posicoes(l, ROT_INTERN)
+            mapa_int = mapear(l, ROT_INTERN)
             espera = "intern"
             continue
         if s.startswith("GLOSA") and "COD.ITEM" in l:
-            pos_esq = posicoes(l, ROT_ITEM_ESQ)
-            pos_dir = posicoes(l, [r for r in ROT_ITEM_DIR if r in l])
-            # alguns blocos vêm com o cabeçalho cortado (sem AUDITOR)
-            if "AUDITOR" not in l and "JUSTIFICATIVA" in l:
-                pos_dir.append(l.index("JUSTIFICATIVA") + 51)
-            largura_desc = l.index("QT.COBR") - pos_esq[-1] - 5
+            mapa_esq = mapear(l, ROT_ITEM_ESQ)
+            mapa_dir = mapear(l, ROT_ITEM_DIR)
+            nomes_dir = [n for n, _ in mapa_dir]
+            # layout antigo com cabeçalho cortado: AUDITOR não aparece, mas vem
+            # logo depois da JUSTIFICATIVA (que tem largura fixa)
+            if "AUDITOR" not in nomes_dir and nomes_dir and nomes_dir[-1] == "JUSTIFICATIVA":
+                mapa_dir.append(("AUDITOR", mapa_dir[-1][1] + LARGURA_JUSTIFICATIVA))
+            pos_desc = dict(mapa_esq)["DESCRICAO"]
+            largura_desc = l.index("QT.COBR") - pos_desc - 5
+            ini_num = pos_desc + largura_desc                 # números começam após a descrição
+            fim_num = min(p for _, p in mapa_dir)             # e terminam na 1ª coluna da direita
             espera = None
             continue
         if "Itens Ajustados" in l:
@@ -187,52 +210,57 @@ def parse_detalhe(linhas):
             continue
 
         if espera == "guia":
-            guia = [valor(c) for c in fatiar(l, pos_guia)]
+            guia = {n: _conv(n, t) for n, t in fatiar(l, mapa_guia).items()}
             espera = None
             continue
         if espera == "intern":
-            intern = [valor(c) for c in fatiar(l, pos_int)]
+            intern = {n: _conv(n, t) for n, t in fatiar(l, mapa_int).items()}
             espera = None
             continue
 
         # Linha de item: tem COD.ITEM preenchido e 4 valores numéricos
-        if pos_esq is None or not l[pos_esq[2]:pos_esq[3]].strip():
+        if mapa_esq is None:
             continue
-        ini_num = pos_esq[-1] + largura_desc
-        fim_num = pos_dir[0]
+        esq = fatiar(l[:ini_num], mapa_esq)
+        if not esq.get("COD.ITEM"):
+            continue
         nums = RE_NUM_BR.findall(l[ini_num:fim_num])
         if len(nums) != 4:
             continue
-        esq = fatiar(l[:ini_num], pos_esq)
-        dir_ = fatiar(l, pos_dir)
-        dir_ += [""] * (len(ROT_ITEM_DIR) - len(dir_))   # itens ajustados não têm justificativa/auditor
+        dir_ = fatiar(l, mapa_dir)
 
-        linha = (guia + intern
-                 + [valor(c) if i != 4 else (c or None) for i, c in enumerate(esq)]
-                 + [num_br(n) for n in nums]
-                 + [valor(c) if i not in (4, 5, 6) else (c or None) for i, c in enumerate(dir_)]
-                 + ["ITEM AJUSTADO" if ajustado else "GLOSADO"])
-        saida.append(linha)
+        campos = {**guia, **intern}
+        campos.update({n: _conv(n, t) for n, t in esq.items()})
+        campos.update(zip(["QT.COBR", "QT.PAGA", "VL.COBR", "VL.PAGO"], map(num_br, nums)))
+        campos.update({n: _conv(n, t) for n, t in dir_.items()})
+        campos["SITUAÇÃO"] = "ITEM AJUSTADO" if ajustado else "GLOSADO"
+        saida.append([campos.get(n) for n in CAB_DETALHE])
     return saida
 
 
 # ------------------- ITENS COM VALOR DIFERENTE ----------------------------- #
-CAB_VALOR_DIF = ["COD.ITEM", "DESC.ITEM", "VL.INFOR", "VL.PAGO", "DT.EXECUÇÃO"]
+ROT_VALOR_DIF = {"GUIA SGU": ["GUIA SGU"], "ID GUIA": ["ID GUIA"], "COD.ITEM": ["COD.ITEM"],
+                 "DESC.ITEM": ["DESC.ITEM"], "VL.INFOR": ["VL.INFOR", "VL.INFORMADO"],
+                 "VL.PAGO": ["VL.PAGO"], "DT.EXECUÇÃO": ["DT.EXECUÇÃO", "DT.EXECUCAO"]}
 
 
 def parse_valor_dif(linhas):
-    pos, saida = None, []
+    """Devolve (cabeçalho, linhas). As colunas seguem as que existem no relatório."""
+    mapa, saida = None, []
     for l in linhas:
-        if pos is None and "COD.ITEM" in l and "VL.INFOR" in l:
-            pos = posicoes(l, ["COD.ITEM", "DESC.ITEM", "VL.INFOR", "VL.PAGO", "DT.EXEC"])
+        if mapa is None and "COD.ITEM" in l and "VL.INFOR" in l:
+            mapa = mapear(l, ROT_VALOR_DIF)
             continue
-        if pos is None or not l.strip() or set(l.strip()) <= {"-", "="}:
+        if mapa is None or not l.strip() or set(l.strip()) <= {"-", "="}:
             continue
-        c = fatiar(l, pos)
-        if not c[0]:
+        c = fatiar(l, mapa)
+        if not c.get("COD.ITEM"):
             continue
-        saida.append([valor(c[0]), c[1], num_br(c[2]), num_br(c[3]), valor(c[4])])
-    return saida
+        saida.append([num_br(c[n]) if n in ("VL.INFOR", "VL.PAGO")
+                      else (c[n] or None) if n == "DESC.ITEM"
+                      else valor(c[n]) for n, _ in mapa])
+    cabecalho = [n for n, _ in mapa] if mapa else list(ROT_VALOR_DIF)[2:]
+    return cabecalho, saida
 
 
 # --------------------------- MAPA DE SELEÇÃO ------------------------------- #
@@ -323,7 +351,7 @@ def gerar_planilha(dados):
 
     resumo = parse_resumo(sec.get("resumo", []))
     detalhe = parse_detalhe(sec.get("detalhe", []))
-    valor_dif = parse_valor_dif(sec.get("valor_dif", []))
+    cab_valor_dif, valor_dif = parse_valor_dif(sec.get("valor_dif", []))
     mapa = parse_mapa(sec.get("mapa", []))
     glosa = parse_glosa(sec.get("glosa", []))
 
@@ -334,7 +362,7 @@ def gerar_planilha(dados):
     wb.remove(wb.active)
     escrever_aba(wb, "RESUMO", CAB_RESUMO, resumo)
     escrever_aba(wb, "DETALHAMENTO", CAB_DETALHE, detalhe)
-    escrever_aba(wb, "ITENS COM VALOR DIFERENTE", CAB_VALOR_DIF, valor_dif)
+    escrever_aba(wb, "ITENS COM VALOR DIFERENTE", cab_valor_dif, valor_dif)
     escrever_aba(wb, "MAPA DE SELEÇÃO", None, mapa, largura_max=55)
     escrever_aba(wb, "Glosa", None, glosa, largura_max=70)
 

@@ -8,7 +8,7 @@ echo.
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt pyinstaller
 echo.
-python -m PyInstaller --noconfirm --clean --onefile --windowed ^
+python -m PyInstaller --noconfirm --clean --onedir --windowed ^
   --name "ConversorGlosas" ^
   --icon "icone.ico" ^
   --paths "." ^
